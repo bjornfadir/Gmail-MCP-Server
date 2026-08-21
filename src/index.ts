@@ -677,6 +677,10 @@ async function main() {
                     const to = headers.find(h => h.name?.toLowerCase() === 'to')?.value || '';
                     const date = headers.find(h => h.name?.toLowerCase() === 'date')?.value || '';
                     const threadId = response.data.threadId || '';
+                    // Heimdall addition (gmail_triage ID-020): exposes read-state so a
+                    // carried-forward message can be re-checked by ID without a
+                    // windowed search — see triage_prompt.md's carry-forward step.
+                    const unread = (response.data.labelIds || []).includes('UNREAD');
 
                     // Extract email content using the recursive function
                     const { text, html } = extractEmailContent(response.data.payload as GmailMessagePart || {});
@@ -722,7 +726,7 @@ async function main() {
                         content: [
                             {
                                 type: "text",
-                                text: `Thread ID: ${threadId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${contentTypeNote}${body}${attachmentInfo}`,
+                                text: `Thread ID: ${threadId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\nUnread: ${unread}\n\n${contentTypeNote}${body}${attachmentInfo}`,
                             },
                         ],
                     };
