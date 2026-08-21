@@ -225,6 +225,15 @@ const DeleteEmailSchema = z.object({
     messageId: z.string().describe("ID of the email message to delete"),
 });
 
+// Heimdall guard (gmail_triage ID-003): tier-gated read-state mutation.
+// Refuses to remove UNREAD unless the caller explicitly asserts TIER_3 —
+// keeps the "mark as read" decision an enforced interface boundary, not
+// just a prompt instruction. See modify_email's matching guard below.
+const MarkAsReadSchema = z.object({
+    messageId: z.string().describe("ID of the email message to mark as read"),
+    tier: z.enum(["TIER_1", "TIER_2", "TIER_3"]).describe("Triage tier assigned to this message. Only TIER_3 (low priority/automated) may be marked as read — TIER_1 and TIER_2 must stay unread."),
+});
+
 // New schema for listing email labels
 const ListEmailLabelsSchema = z.object({}).describe("Retrieves all available Gmail labels");
 
@@ -365,8 +374,13 @@ async function main() {
             },
             {
                 name: "modify_email",
-                description: "Modifies email labels (move to different folders)",
+                description: "Modifies email labels (move to different folders). Cannot remove the UNREAD label directly — use mark_as_read for that, which is tier-gated.",
                 inputSchema: zodToJsonSchema(ModifyEmailSchema),
+            },
+            {
+                name: "mark_as_read",
+                description: "Marks an email as read by removing the UNREAD label. Only fires if tier is TIER_3 — refuses otherwise. This is the only way to remove UNREAD; modify_email rejects it.",
+                inputSchema: zodToJsonSchema(MarkAsReadSchema),
             },
             {
                 name: "delete_email",
@@ -712,22 +726,29 @@ async function main() {
                 // Updated implementation for the modify_email handler
                 case "modify_email": {
                     const validatedArgs = ModifyEmailSchema.parse(args);
-                    
+
+                    // Heimdall guard (gmail_triage ID-003): the raw passthrough may not
+                    // remove UNREAD. That mutation must go through mark_as_read, which
+                    // requires an explicit TIER_3 assertion. Do not remove this check.
+                    if (validatedArgs.removeLabelIds?.includes('UNREAD')) {
+                        throw new Error("modify_email cannot remove the UNREAD label. Use mark_as_read(messageId, tier) instead — it requires tier === 'TIER_3'.");
+                    }
+
                     // Prepare request body
                     const requestBody: any = {};
-                    
+
                     if (validatedArgs.labelIds) {
                         requestBody.addLabelIds = validatedArgs.labelIds;
                     }
-                    
+
                     if (validatedArgs.addLabelIds) {
                         requestBody.addLabelIds = validatedArgs.addLabelIds;
                     }
-                    
+
                     if (validatedArgs.removeLabelIds) {
                         requestBody.removeLabelIds = validatedArgs.removeLabelIds;
                     }
-                    
+
                     await gmail.users.messages.modify({
                         userId: 'me',
                         id: validatedArgs.messageId,
@@ -739,6 +760,34 @@ async function main() {
                             {
                                 type: "text",
                                 text: `Email ${validatedArgs.messageId} labels updated successfully`,
+                            },
+                        ],
+                    };
+                }
+
+                // Heimdall guard (gmail_triage ID-003): tier-gated mark-as-read.
+                // The tier check is the enforced boundary — refuses to fire unless
+                // the caller explicitly asserts TIER_3, regardless of what a prompt
+                // was told to do. Keep this isolated from upstream's modify_email
+                // logic so future upstream merges stay low-friction.
+                case "mark_as_read": {
+                    const validatedArgs = MarkAsReadSchema.parse(args);
+
+                    if (validatedArgs.tier !== "TIER_3") {
+                        throw new Error(`mark_as_read refused: tier "${validatedArgs.tier}" is not TIER_3. Only TIER_3 (low priority/automated) messages may be marked as read — TIER_1 and TIER_2 must stay unread.`);
+                    }
+
+                    await gmail.users.messages.modify({
+                        userId: 'me',
+                        id: validatedArgs.messageId,
+                        requestBody: { removeLabelIds: ['UNREAD'] },
+                    });
+
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `Email ${validatedArgs.messageId} marked as read (tier: TIER_3).`,
                             },
                         ],
                     };
@@ -784,7 +833,13 @@ async function main() {
                     const validatedArgs = BatchModifyEmailsSchema.parse(args);
                     const messageIds = validatedArgs.messageIds;
                     const batchSize = validatedArgs.batchSize || 50;
-                    
+
+                    // Heimdall guard (gmail_triage ID-003): same UNREAD restriction as
+                    // modify_email — bulk mutation is not exempt from the tier gate.
+                    if (validatedArgs.removeLabelIds?.includes('UNREAD')) {
+                        throw new Error("batch_modify_emails cannot remove the UNREAD label. Use mark_as_read(messageId, tier) per-message instead — it requires tier === 'TIER_3'.");
+                    }
+
                     // Prepare request body
                     const requestBody: any = {};
                     
