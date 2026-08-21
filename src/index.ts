@@ -229,6 +229,7 @@ const ReadEmailSchema = z.object({
 const SearchEmailsSchema = z.object({
     query: z.string().describe("Gmail search query (e.g., 'from:example@gmail.com')"),
     maxResults: z.number().optional().describe("Maximum number of results to return"),
+    pageToken: z.string().optional().describe("Page token from a previous search_emails call's nextPageToken, to fetch the next page of results"),
 });
 
 // Updated schema to include removeLabelIds
@@ -738,6 +739,7 @@ async function main() {
                         userId: 'me',
                         q: validatedArgs.query,
                         maxResults: validatedArgs.maxResults || 10,
+                        pageToken: validatedArgs.pageToken,
                     });
 
                     const messages = response.data.messages || [];
@@ -759,13 +761,23 @@ async function main() {
                         })
                     );
 
+                    // Heimdall addition (gmail_triage ID-025): expose Gmail's own
+                    // pagination cursor instead of leaving the caller to guess
+                    // whether a result set was truncated. Without this, a query
+                    // matching more than maxResults silently drops the remainder
+                    // with no signal at all.
+                    const nextPageToken = response.data.nextPageToken;
+                    const paginationNote = nextPageToken
+                        ? `\n---\nnextPageToken: ${nextPageToken}\n(More results exist. Call search_emails again with the same query and this pageToken to get the next page.)`
+                        : `\n---\nnextPageToken: none (this is the complete result set for this query)`;
+
                     return {
                         content: [
                             {
                                 type: "text",
                                 text: results.map(r =>
                                     `ID: ${r.id}\nSubject: ${r.subject}\nFrom: ${r.from}\nDate: ${r.date}\n`
-                                ).join('\n'),
+                                ).join('\n') + paginationNote,
                             },
                         ],
                     };
