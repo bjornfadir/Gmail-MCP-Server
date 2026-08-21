@@ -16,11 +16,20 @@ import { fileURLToPath } from 'url';
 import http from 'http';
 import open from 'open';
 import os from 'os';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const execFileAsync = promisify(execFile);
+
+// gmail_triage Task-013 ("Thing B"): the deal classifier is a separate,
+// deterministic Python module (no LLM inside it — see FN-013 in global
+// field_notes.md and decision log ID-015). This server only shells out to
+// it; all the actual prediction logic lives in classifier/deal_classifier.py.
+const DEAL_CLASSIFIER_PATH = path.join(__dirname, '..', '..', 'classifier', 'deal_classifier.py');
 
 // Configuration paths
 const CONFIG_DIR = path.join(os.homedir(), '.gmail-mcp');
@@ -251,6 +260,14 @@ const MarkAsReadSchema = z.object({
     tier: z.enum(["TIER_1", "TIER_2", "TIER_3"]).describe("Triage tier assigned to this message. Only TIER_3 (low priority/automated) may be marked as read — TIER_1 and TIER_2 must stay unread."),
 });
 
+// gmail_triage Task-013 ("Thing B"): local deal-preference classifier.
+// Deterministic under the hood — this tool exists so the triage prompt can
+// consult a real prediction without any judgment happening inside the LLM
+// call itself. See classifier/deal_classifier.py and decision log ID-015.
+const CheckDealAppealSchema = z.object({
+    messageId: z.string().describe("ID of the email message to check against the trained deal-preference classifier"),
+});
+
 // New schema for listing email labels
 const ListEmailLabelsSchema = z.object({}).describe("Retrieves all available Gmail labels");
 
@@ -398,6 +415,11 @@ async function main() {
                 name: "mark_as_read",
                 description: "Marks an email as read by removing the UNREAD label. Only fires if tier is TIER_3 — refuses otherwise. This is the only way to remove UNREAD; modify_email rejects it.",
                 inputSchema: zodToJsonSchema(MarkAsReadSchema),
+            },
+            {
+                name: "check_deal_appeal",
+                description: "Checks a promotional/TIER_3-candidate email against the locally-trained deal-preference classifier. Returns {appealing, confidence, reason} — appealing=true means Adam has historically liked similar deals. Returns appealing=false with reason='insufficient_training_data' until enough swipe history exists. Purely informational — does not modify anything.",
+                inputSchema: zodToJsonSchema(CheckDealAppealSchema),
             },
             {
                 name: "delete_email",
@@ -827,6 +849,39 @@ async function main() {
                             {
                                 type: "text",
                                 text: `Email ${validatedArgs.messageId} deleted successfully`,
+                            },
+                        ],
+                    };
+                }
+
+                case "check_deal_appeal": {
+                    const validatedArgs = CheckDealAppealSchema.parse(args);
+
+                    const msg = await gmail.users.messages.get({
+                        userId: 'me',
+                        id: validatedArgs.messageId,
+                        format: 'metadata',
+                        metadataHeaders: ['From', 'Subject'],
+                    });
+
+                    const headers = msg.data.payload?.headers || [];
+                    const sender = headers.find(h => h.name === 'From')?.value || '';
+                    const subject = headers.find(h => h.name === 'Subject')?.value || '';
+                    const snippet = msg.data.snippet || '';
+
+                    const { stdout } = await execFileAsync('python3', [
+                        DEAL_CLASSIFIER_PATH, 'predict',
+                        '--sender', sender, '--subject', subject, '--snippet', snippet,
+                    ]);
+
+                    // Deliberately pass the classifier's own JSON straight through —
+                    // this tool is informational, not a gate, so there's nothing to
+                    // enforce here beyond "the number came from the real model."
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: stdout.trim(),
                             },
                         ],
                     };
