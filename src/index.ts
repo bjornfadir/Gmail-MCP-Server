@@ -123,9 +123,12 @@ async function loadCredentials() {
             process.exit(1);
         }
 
-        const callback = process.argv[2] === 'auth' && process.argv[3] 
-        ? process.argv[3] 
-        : "http://localhost:3000/oauth2callback";
+        // Heimdall guard (gmail_triage ID-008 addendum, 2026-08-21): upstream hardcoded
+        // port 3000, which collided with an unrelated pre-existing service on this host
+        // (EADDRINUSE). Moved to 3939, an unused port confirmed free at patch time.
+        const callback = process.argv[2] === 'auth' && process.argv[3]
+        ? process.argv[3]
+        : "http://localhost:3939/oauth2callback";
 
         oauth2Client = new OAuth2Client(
             keys.client_id,
@@ -145,14 +148,20 @@ async function loadCredentials() {
 
 async function authenticate() {
     const server = http.createServer();
-    server.listen(3000);
+    server.listen(3939);
 
     return new Promise<void>((resolve, reject) => {
+        // Heimdall guard (gmail_triage ID-008 addendum, 2026-08-21): upstream requested
+        // gmail.modify + gmail.settings.basic, which doesn't match the four scopes
+        // actually registered on the OAuth consent screen (readonly/labels/compose/modify)
+        // and would fail on an unregistered scope. Matched to what's registered.
         const authUrl = oauth2Client.generateAuthUrl({
             access_type: 'offline',
             scope: [
+                'https://www.googleapis.com/auth/gmail.readonly',
+                'https://www.googleapis.com/auth/gmail.labels',
+                'https://www.googleapis.com/auth/gmail.compose',
                 'https://www.googleapis.com/auth/gmail.modify',
-                'https://www.googleapis.com/auth/gmail.settings.basic'
             ],
         });
 
@@ -162,7 +171,7 @@ async function authenticate() {
         server.on('request', async (req, res) => {
             if (!req.url?.startsWith('/oauth2callback')) return;
 
-            const url = new URL(req.url, 'http://localhost:3000');
+            const url = new URL(req.url, 'http://localhost:3939');
             const code = url.searchParams.get('code');
 
             if (!code) {
