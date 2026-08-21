@@ -234,6 +234,14 @@ const DeleteEmailSchema = z.object({
     messageId: z.string().describe("ID of the email message to delete"),
 });
 
+// gmail_triage ID-012: upstream had drafts.create but no way to remove a
+// draft short of the full mail.google.com-scoped delete_email. Deleting a
+// draft only needs gmail.compose (already granted) via drafts.delete —
+// a narrower, already-in-scope operation, not a guard/permission change.
+const DeleteDraftSchema = z.object({
+    draftId: z.string().describe("ID of the draft to delete (the id returned by draft_email, not the message id)"),
+});
+
 // Heimdall guard (gmail_triage ID-003): tier-gated read-state mutation.
 // Refuses to remove UNREAD unless the caller explicitly asserts TIER_3 —
 // keeps the "mark as read" decision an enforced interface boundary, not
@@ -395,6 +403,11 @@ async function main() {
                 name: "delete_email",
                 description: "Permanently deletes an email",
                 inputSchema: zodToJsonSchema(DeleteEmailSchema),
+            },
+            {
+                name: "delete_draft",
+                description: "Deletes a draft (by draft ID, from draft_email's response) without needing the full mail-delete scope.",
+                inputSchema: zodToJsonSchema(DeleteDraftSchema),
             },
             {
                 name: "list_email_labels",
@@ -814,6 +827,23 @@ async function main() {
                             {
                                 type: "text",
                                 text: `Email ${validatedArgs.messageId} deleted successfully`,
+                            },
+                        ],
+                    };
+                }
+
+                case "delete_draft": {
+                    const validatedArgs = DeleteDraftSchema.parse(args);
+                    await gmail.users.drafts.delete({
+                        userId: 'me',
+                        id: validatedArgs.draftId,
+                    });
+
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `Draft ${validatedArgs.draftId} deleted successfully`,
                             },
                         ],
                     };
